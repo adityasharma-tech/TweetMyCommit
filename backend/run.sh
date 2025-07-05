@@ -1,0 +1,1 @@
+./.venv/bin/python -m fastapi dev /home/$USER/TweetMyCommit/backend/main.py

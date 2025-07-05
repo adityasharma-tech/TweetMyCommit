@@ -1,0 +1,13 @@
+[project]
+name = "tweetmycommit"
+version = "0.1.0"
+description = "Add your description here"
+readme = "README.md"
+requires-python = ">=3.12"
+dependencies = [
+    "fastapi-limiter>=0.1.6",
+    "fastapi[standard]>=0.115.14",
+    "langchain-google-genai>=2.1.6",
+    "python-dotenv>=1.1.1",
+    "requests>=2.32.4",
+]
