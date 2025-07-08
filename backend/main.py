@@ -5,6 +5,7 @@ from fastapi import Depends, FastAPI
 from dotenv import load_dotenv
 from datetime import datetime, timezone, timedelta
 from langchain_google_genai import ChatGoogleGenerativeAI
+from fastapi.middleware.cors import CORSMiddleware
 
 from fastapi_limiter import FastAPILimiter
 from fastapi_limiter.depends import RateLimiter
@@ -28,6 +29,14 @@ class Response:
         else:
             self.success = self.statusCode < 400
 
+class Error(Exception):
+
+    def __init__(self, Response: Response):
+        super()
+        self.__Response = Response
+
+    def get(self):
+        return self.__Response
 
 class GitApi:
     def __init__(self):
@@ -37,22 +46,30 @@ class GitApi:
             "X-GitHub-Api-Version": "2022-11-28"
         }
 
-    def list_commits(self, username, repo, since=(datetime.now(timezone.utc) - timedelta(days=4)).isoformat(), until=datetime.now(timezone.utc).isoformat()):
+    def get_commit_diff_list(self, username, repo, since, until, max_commits):
         url = f"https://api.github.com/repos/{username}/{repo}/commits?per_page=20&since={since}&until={until}"
         response = requests.get(url, headers=self.default_headers)
         commits = response.json()
+
         if response.status_code >= 400:
-            return Response(int(response.status_code), None, "Something went wrong!")
+            raise Error(Response(int(response.status_code), None, "Something went wrong!"))
         
         if len(commits) <= 1:
-            return Response(400, None, "Commits must be greater than one")
+            raise Error(Response(400, None, "Commits must be greater than one"))
         
         diff_sha = []
         
-        for index, commit in enumerate(commits):
+        for index, commit in enumerate(commits[:max_commits]):
             sha = commit['sha']
             if(index != len(commits)-1):
                 diff_sha.append([ sha, commits[index+1]['sha']])
+
+        return diff_sha
+
+
+    def list_commits(self, username, repo, since=(datetime.now(timezone.utc) - timedelta(days=4)).isoformat(), until=datetime.now(timezone.utc).isoformat(), char_length=280, max_files_each_diff=10, max_commits=10):
+        
+        diff_sha = self.get_commit_diff_list(username, repo, since, until, max_commits)
 
         tweet_refrence = ""
 
@@ -67,7 +84,7 @@ class GitApi:
 
             content = ""
 
-            for idx, file in enumerate(data['files']):
+            for idx, file in enumerate(data['files'][:max_files_each_diff]):
                 if "patch" in file:
                     content += f"id: {idx},filename: {file['filename']} & changed content: {file['patch']}\n"
 
@@ -89,9 +106,9 @@ class GitApi:
 
             tweet_refrence += llmResult.content
 
-        tweet = llm.invoke([("system", """You are a developer who tweets about your daily work in a natural, human tone. Should be more natural like human, You will be given a list of code changes or technical improvements from your recent work session.
+        tweet = llm.invoke([("system", f"""You are a developer who tweets about your daily work in a natural, human tone. Should be more natural like human, You will be given a list of code changes or technical improvements from your recent work session.
 
-        Your task is to write a short tweet (under 200 characters) that captures what you *did*, *built*, or *learned* today — like you're talking to other devs or followers on Twitter/X.
+        Your task is to write a short tweet (under {char_length} characters) that captures what you *did*, *built*, or *learned* today — like you're talking to other devs or followers on Twitter/X. Very precise with a coder perspective
 
         Focus on:
         - What you implemented or refactored
@@ -126,14 +143,20 @@ class GitApi:
 
 api = GitApi()
 
+app.add_middleware(CORSMiddleware, allow_origins=['http://localhost:9000'], allow_credentials=True, allow_methods=["*"], allow_headers=["*"])
+
+
 @app.on_event("startup")
 async def startup():
     redis_connection = redis.from_url(REDIS_URI, encoding="utf-8", decode_responses=True)
     await FastAPILimiter.init(redis_connection)
 
-@app.get('/{username}/{repository}', dependencies=[Depends(RateLimiter(times=2, seconds=60*60))])
-async def healthCheck(username, repository):
-    result = api.list_commits(username, repository)
+@app.get('/{username}/{repository}', dependencies=[Depends(RateLimiter(times=20, seconds=60*60))])
+async def healthCheck(username, repository, char_length=280, max_file_each_diff=10, max_commits=10):
+    try:
+        result = api.list_commits(username, repository, char_length=char_length, max_files_each_diff=max_file_each_diff, max_commits=max_commits)
+    except Error as e:
+        return e.get()
     if result:
         return result
     return Response(200, None)
